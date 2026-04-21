@@ -704,6 +704,63 @@ impl<T> Term<T> {
         self.damage.resize(num_cols, num_lines);
     }
 
+    /// Resize the terminal without reflowing rows in the primary grid.
+    ///
+    /// `resize` (above) unconditionally reflows the primary grid, which
+    /// rewraps every `WRAPLINE`-marked row to the new width. On narrowing
+    /// this can promote a large number of rows into scrollback history
+    /// (one extra row per long wrapped line), visibly shifting the
+    /// scrollbar during interactive resizes.
+    ///
+    /// `resize_no_reflow` keeps the same semantics as `resize` for cursor,
+    /// selection, tabs, damage, and the vi cursor, but passes `reflow=false`
+    /// to both grids' `resize` calls. Content that previously fit on one
+    /// row at the old width is truncated at the new width rather than
+    /// re-wrapped; growing the width does not merge previously-wrapped
+    /// rows. Useful for UIs that want to isolate the PTY size change
+    /// from the user's reading position in history.
+    pub fn resize_no_reflow<S: Dimensions>(&mut self, size: S) {
+        let old_cols = self.columns();
+        let old_lines = self.screen_lines();
+
+        let num_cols = size.columns();
+        let num_lines = size.screen_lines();
+
+        if old_cols == num_cols && old_lines == num_lines {
+            return;
+        }
+
+        // Move vi mode cursor with the content.
+        let history_size = self.history_size();
+        let mut delta = num_lines as i32 - old_lines as i32;
+        let min_delta = cmp::min(0, num_lines as i32 - self.grid.cursor.point.line.0 - 1);
+        delta = cmp::min(cmp::max(delta, min_delta), history_size as i32);
+        self.vi_mode_cursor.point.line += delta;
+
+        // reflow=false on both grids.
+        self.grid.resize(false, num_lines, num_cols);
+        self.inactive_grid.resize(false, num_lines, num_cols);
+
+        if old_cols != num_cols {
+            self.selection = None;
+            self.tabs.resize(num_cols);
+        } else if let Some(selection) = self.selection.take() {
+            let max_lines = cmp::max(num_lines, old_lines) as i32;
+            let range = Line(0)..Line(max_lines);
+            self.selection = selection.rotate(self, &range, -delta);
+        }
+
+        let vi_point = self.vi_mode_cursor.point;
+        let viewport_top = Line(-(self.grid.display_offset() as i32));
+        let viewport_bottom = viewport_top + self.bottommost_line();
+        self.vi_mode_cursor.point.line =
+            cmp::max(cmp::min(vi_point.line, viewport_bottom), viewport_top);
+        self.vi_mode_cursor.point.column = cmp::min(vi_point.column, self.last_column());
+
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.damage.resize(num_cols, num_lines);
+    }
+
     /// Active terminal modes.
     #[inline]
     pub fn mode(&self) -> &TermMode {
