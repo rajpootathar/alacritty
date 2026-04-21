@@ -737,9 +737,34 @@ impl<T> Term<T> {
         delta = cmp::min(cmp::max(delta, min_delta), history_size as i32);
         self.vi_mode_cursor.point.line += delta;
 
+        // Preserve the user's reading position across a shrink. When
+        // shrink_lines runs it pushes (old_lines - new_lines) rows into
+        // scrollback via scroll_up (unaffected by the reflow flag). If
+        // the user was scrolled up, those newly-pushed rows sit BELOW
+        // their view, effectively shifting everything they see up by
+        // that many rows. Snapshot display_offset before resize and
+        // compensate after, so their absolute reading position doesn't
+        // move. Only relevant when shrinking (delta < 0) AND the user
+        // had history showing.
+        let old_display_offset = self.grid.display_offset();
+        let old_history = history_size;
+
         // reflow=false on both grids.
         self.grid.resize(false, num_lines, num_cols);
         self.inactive_grid.resize(false, num_lines, num_cols);
+
+        // Compensate display_offset for any rows pushed to history
+        // during the shrink.
+        if old_display_offset > 0 && num_lines < old_lines {
+            let new_history = self.grid.history_size();
+            let pushed = new_history.saturating_sub(old_history);
+            if pushed > 0 {
+                let target = (old_display_offset + pushed).min(new_history);
+                self.grid.scroll_display(Scroll::Delta(
+                    (target as i32) - (self.grid.display_offset() as i32),
+                ));
+            }
+        }
 
         if old_cols != num_cols {
             self.selection = None;
