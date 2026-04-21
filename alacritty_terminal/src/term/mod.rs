@@ -784,6 +784,26 @@ impl<T> Term<T> {
 
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.damage.resize(num_cols, num_lines);
+
+        // Blank the viewport after a dimensions change. SIGWINCH makes
+        // TUI apps (Ink / Claude Code / vim / less / htop) redraw their
+        // UI from scratch. If the old frame is still in the viewport
+        // when the TUI starts writing its new frame, the TUI's writes
+        // push the old frame up with LFs — the first ~viewport-sized
+        // chunk of those old-frame rows lands in scrollback as a
+        // ghost. Subsequent resizes stack more ghosts. Resetting the
+        // viewport in place (no scroll_up, no history churn) gives the
+        // TUI a blank canvas and eliminates the ghosting.
+        let region = Line(0)..Line(num_lines as i32);
+        self.grid.reset_region(region.clone());
+        self.inactive_grid.reset_region(region);
+
+        // Re-home cursor — blanking the viewport with a stale cursor
+        // position means the TUI's first write lands wherever the old
+        // cursor was. Ink then repaints from there, not from (0,0),
+        // leaving blank rows above its redraw.
+        self.grid.cursor.point.line = Line(0);
+        self.grid.cursor.point.column = Column(0);
     }
 
     /// Active terminal modes.
