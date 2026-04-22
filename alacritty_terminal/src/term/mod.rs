@@ -737,34 +737,9 @@ impl<T> Term<T> {
         delta = cmp::min(cmp::max(delta, min_delta), history_size as i32);
         self.vi_mode_cursor.point.line += delta;
 
-        // Preserve the user's reading position across a shrink. When
-        // shrink_lines runs it pushes (old_lines - new_lines) rows into
-        // scrollback via scroll_up (unaffected by the reflow flag). If
-        // the user was scrolled up, those newly-pushed rows sit BELOW
-        // their view, effectively shifting everything they see up by
-        // that many rows. Snapshot display_offset before resize and
-        // compensate after, so their absolute reading position doesn't
-        // move. Only relevant when shrinking (delta < 0) AND the user
-        // had history showing.
-        let old_display_offset = self.grid.display_offset();
-        let old_history = history_size;
-
         // reflow=false on both grids.
         self.grid.resize(false, num_lines, num_cols);
         self.inactive_grid.resize(false, num_lines, num_cols);
-
-        // Compensate display_offset for any rows pushed to history
-        // during the shrink.
-        if old_display_offset > 0 && num_lines < old_lines {
-            let new_history = self.grid.history_size();
-            let pushed = new_history.saturating_sub(old_history);
-            if pushed > 0 {
-                let target = (old_display_offset + pushed).min(new_history);
-                self.grid.scroll_display(Scroll::Delta(
-                    (target as i32) - (self.grid.display_offset() as i32),
-                ));
-            }
-        }
 
         if old_cols != num_cols {
             self.selection = None;
@@ -784,26 +759,6 @@ impl<T> Term<T> {
 
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.damage.resize(num_cols, num_lines);
-
-        // Blank the viewport after a dimensions change. SIGWINCH makes
-        // TUI apps (Ink / Claude Code / vim / less / htop) redraw their
-        // UI from scratch. If the old frame is still in the viewport
-        // when the TUI starts writing its new frame, the TUI's writes
-        // push the old frame up with LFs — the first ~viewport-sized
-        // chunk of those old-frame rows lands in scrollback as a
-        // ghost. Subsequent resizes stack more ghosts. Resetting the
-        // viewport in place (no scroll_up, no history churn) gives the
-        // TUI a blank canvas and eliminates the ghosting.
-        let region = Line(0)..Line(num_lines as i32);
-        self.grid.reset_region(region.clone());
-        self.inactive_grid.reset_region(region);
-
-        // Re-home cursor — blanking the viewport with a stale cursor
-        // position means the TUI's first write lands wherever the old
-        // cursor was. Ink then repaints from there, not from (0,0),
-        // leaving blank rows above its redraw.
-        self.grid.cursor.point.line = Line(0);
-        self.grid.cursor.point.column = Column(0);
     }
 
     /// Active terminal modes.
@@ -2091,7 +2046,19 @@ impl<T: EventListener> Handler for Term<T> {
                 style.blinking = true;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             },
-            NamedPrivateMode::SyncUpdate => (),
+            // DEC 2026 Synchronized Output: while the block is open, any
+            // scroll_up that would normally push rows into scrollback
+            // instead overwrites them in place. This matches what
+            // shadow-grid terminals (iTerm2, Ghostty, kitty) produce at
+            // commit time — intermediate frame rows never promote to
+            // history. Embedders using vte's StdSyncHandler stash-and-
+            // replay path will see this flag flip BEFORE the stashed
+            // bytes are re-dispatched on ESU, so the replayed LFs are
+            // correctly suppressed. Embedders using a custom Timeout
+            // that disables the stash will see the flag flip live.
+            NamedPrivateMode::SyncUpdate => {
+                self.grid.suppress_history_growth = true;
+            },
         }
     }
 
@@ -2140,7 +2107,10 @@ impl<T: EventListener> Handler for Term<T> {
                 style.blinking = false;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             },
-            NamedPrivateMode::SyncUpdate => (),
+            // See set_private_mode(SyncUpdate) for full rationale.
+            NamedPrivateMode::SyncUpdate => {
+                self.grid.suppress_history_growth = false;
+            },
         }
     }
 

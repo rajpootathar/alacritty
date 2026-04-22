@@ -135,6 +135,24 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// When true, `scroll_up` against the default region (`region.start == 0`)
+    /// will NOT grow the scrollback. Rows that would have been promoted into
+    /// history are overwritten by the rotation instead.
+    ///
+    /// Intended for wrapping DEC mode 2026 synchronized-output blocks: Ink-
+    /// style TUIs emit frame-level redraws whose intra-block scrolls are not
+    /// semantically "user content advancing into history" — they're the
+    /// intermediate steps of an atomic frame commit. A terminal that correctly
+    /// implements sync (iTerm2, kitty, Ghostty) renders these against a
+    /// shadow grid and never promotes intermediate rows. This flag gives us
+    /// equivalent semantics without a shadow grid: the main grid mutates in
+    /// place, but the scrollback stays quiet for the duration of the block.
+    ///
+    /// The embedder (e.g. `crane`'s `CraneTermHandler`) owns the flag and
+    /// clears it at `?2026l`. Default is `false` — history behaves normally.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub suppress_history_growth: bool,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -147,6 +165,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            suppress_history_growth: false,
         }
     }
 
@@ -270,8 +289,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
-            // Create scrollback for the new lines.
-            self.increase_scroll_limit(positions);
+            // Create scrollback for the new lines. Skipped when the embedder
+            // has marked the grid as inside a synchronized-output block — the
+            // rotate below then overwrites the would-be-history rows with
+            // blanks, matching what a true shadow-grid terminal does.
+            if !self.suppress_history_growth {
+                self.increase_scroll_limit(positions);
+            }
 
             // Swap the lines fixed at the top to their target positions after rotation.
             //
@@ -343,6 +367,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.saved_cursor = Cursor::default();
         self.cursor = Cursor::default();
         self.display_offset = 0;
+        self.suppress_history_growth = false;
 
         // Reset all visible lines.
         let range = self.topmost_line().0..(self.screen_lines() as i32);
